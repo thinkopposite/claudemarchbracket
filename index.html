@@ -176,6 +176,10 @@ td.tm{min-width:190px} td.reg{font-size:12px;color:var(--ink2)}
 .cstrip{margin-bottom:16px}
 .chead{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:12px;gap:12px;flex-wrap:wrap}
 .chead p{margin-top:3px;font-size:14px}
+.cacc{display:inline-flex;align-items:baseline;gap:6px;margin-left:14px;font-size:14px;font-weight:400;color:var(--ink2);background:var(--acc2);border-radius:999px;padding:3px 12px;vertical-align:3px}
+.cacc b{font-family:var(--f-mo);font-size:15px;font-weight:600;color:var(--acc3)} .cacc span{font-family:var(--f-mo);font-size:12px}
+.chip .ca{font-family:var(--f-mo);font-size:11px;color:var(--acc3)} .chip.on .ca{color:#fff}
+.cs-note{font-size:12px;color:var(--ink2);margin-bottom:6px} .cs-note .ca{font-family:var(--f-mo);color:var(--acc3)} .cs-note .bn{font-family:var(--f-mo);font-size:10.5px;background:var(--acc2);color:var(--acc3);border-radius:999px;padding:0 6px}
 .games{margin-top:18px;padding:14px 16px}
 .games h3{font-size:1rem}
 .glist{list-style:none}
@@ -1238,9 +1242,15 @@ function trendChart(keys){
 // ─── Conferences ──────────────────────────────────────────────────
 function renderConfs(){
   const bids = {}; M.field.forEach(k=>{ const c=TEAMS[k].conf; bids[c]=(bids[c]||0)+1; });
-  const ids = Object.keys(CONFS);
+  // Prediction accuracy per conference: every finished game involving a member, graded on its pre-game prediction
+  const acc = confAccuracy();
+  const rate = id => acc[id].c+acc[id].m ? acc[id].c/(acc[id].c+acc[id].m) : -1;
+  const ids = Object.keys(CONFS).sort((a,b)=> rate(b)-rate(a) || (acc[b].c+acc[b].m)-(acc[a].c+acc[a].m) || CONFS[a].n.localeCompare(CONFS[b].n));
+  const rank = id => ids.filter(x=>rate(x)>rate(id)).length + 1;
+  const accTxt = id => rate(id)<0 ? '—' : Math.round(rate(id)*100)+'%';
+  const accTitle = id => rate(id)<0 ? 'No finished games graded yet' : `Prediction accuracy ${(rate(id)*100).toFixed(1)}%: ${acc[id].c} correct of ${acc[id].c+acc[id].m} finished games`;
   if (!CONFS[UI.conf]) UI.conf = ids[0];
-  const chips = ids.map(id=>`<button class="chip${UI.conf===id?' on':''}" data-conf="${id}" title="${esc(CONFS[id].f)}">${esc(CONFS[id].n)}${bids[id]?`<span class="bn">${bids[id]}</span>`:''}</button>`).join('');
+  const chips = ids.map(id=>`<button class="chip${UI.conf===id?' on':''}" data-conf="${id}" title="${esc(CONFS[id].f+' · '+accTitle(id)+(bids[id]?` · ${bids[id]} projected bid${bids[id]>1?'s':''}`:''))}">${esc(CONFS[id].n)}<span class="ca">${accTxt(id)}</span>${bids[id]?`<span class="bn" aria-label="${bids[id]} projected bids">${bids[id]}</span>`:''}</button>`).join('');
   const c = CONFS[UI.conf]; const st = standings(c.id);
   const aqK = M.aq[c.id];
   const played = st.some(t=>t.st.gp);
@@ -1253,8 +1263,9 @@ function renderConfs(){
     <td class="num">${t.l10}</td><td class="num">${t.streak}</td>
     <td class="num">${p?p.seed+(p.or?'<sup>OR</sup>':''):'—'}</td><td class="num">${pct(t.make)}</td><td class="num">${pct(t.aqP)}</td></tr>`; }).join('');
   $('#pane-conf').innerHTML = `
-    <nav class="chips cstrip" aria-label="Conferences">${chips}</nav>
-    <div class="chead"><div><h2>${esc(c.f)}</h2><p class="mut">${c.teams.length} teams · projected bids: <strong>${bids[c.id]||0}</strong> · projected automatic bid: ${aqK?tlink(aqK):'—'} (${pct(TEAMS[aqK]?.aqP)} to win the conference tournament)</p></div></div>
+    <p class="cs-note">Ranked by prediction accuracy, most to least · <span class="ca">%</span> games predicted correctly · <span class="bn">n</span> projected NCAA bids</p>
+    <nav class="chips cstrip" aria-label="Conferences, ranked by prediction accuracy">${chips}</nav>
+    <div class="chead"><div><h2>${esc(c.f)}<span class="cacc" title="${esc(accTitle(c.id)+'. Updates on every refresh as games finish.')}">${rate(c.id)<0?'Prediction accuracy —':`Prediction accuracy <b>${accTxt(c.id)}</b> <span>${acc[c.id].c}–${acc[c.id].m} · #${rank(c.id)} of ${ids.length}</span>`}</span></h2><p class="mut">${c.teams.length} teams · projected bids: <strong>${bids[c.id]||0}</strong> · projected automatic bid: ${aqK?tlink(aqK):'—'} (${pct(TEAMS[aqK]?.aqP)} to win the conference tournament)</p></div></div>
     ${played?'':'<p class="lede">No games yet. Standings are ordered by preseason power rating; records and team stats fill in as games are played.</p>'}
     <div class="tscroll"><table class="stand"><thead><tr><th>#</th><th>Team</th><th title="National power rank">Power</th><th title="Points better than an average D-I team, neutral floor">Rating</th><th>Conf.</th><th>Overall</th><th>Home</th><th>Away</th><th>Neutral</th>
       <th title="Points per game">PPG</th><th title="Opponent points per game">Opp</th><th>FG%</th><th>3P%</th><th title="Rebounds per game">Reb</th><th title="Assists per game">Ast</th><th title="Turnovers per game">TO</th><th>Last 10</th><th>Streak</th><th title="Projected NCAA seed">Seed</th><th>Make field</th><th title="Chance to win the conference tournament">Auto bid</th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -1299,6 +1310,16 @@ function predRecord(games){
     if ((g.hs>g.as?g.h:g.a) === (P.p>=.5?g.h:g.a)) c++; else m++; }
   if (!(c+m)) return '';
   return `<p class="prec">Model on these finished games: <strong>${c} correct, ${m} missed</strong> (${Math.round(100*c/Math.max(1,c+m))}%)${rc?` · ${rc} graded on reconstructed predictions`:''}</p>`;
+}
+function confAccuracy(){
+  const acc = {}; for (const id in CONFS) acc[id] = {c:0, m:0};
+  for (const g of M.games){
+    if (g.st!==2) continue; const P = predOf(g); if (!P) continue;
+    const ok = (g.hs>g.as ? g.h : g.a) === (P.p>=.5 ? g.h : g.a);
+    const cs = new Set([g.h,g.a].filter(k=>TEAMS[k]?.active).map(k=>TEAMS[k].conf));
+    cs.forEach(c=>{ if (acc[c]) acc[c][ok?'c':'m']++; });
+  }
+  return acc;
 }
 function gamesBlock(games, mode, name, focus){
   let gs = mode==='completed' ? games.filter(g=>g.st===2).reverse() : mode==='upcoming' ? games.filter(g=>g.st!==2) : games;
