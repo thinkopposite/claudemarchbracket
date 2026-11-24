@@ -19,7 +19,7 @@
   --ink:#000;--ink2:#63666a;--ink3:#75787b;
   --acc:#009cde;--acc2:#e6f5fc;--acc3:#0077c8;
   --grn:#0077c8;--grn2:#e6f5fc;--red:#63666a;--red2:#f1f2f2;--gld:#b1b3b3;--gld2:#f1f2f2;--blu:#0077c8;--blu2:#e6f5fc;--cyn:#fff;--cyn2:#000;
-  --ok:#1e8e3e;--ok2:#e6f4ea;--bad:#d93025;--bad2:#fce8e6;--close:#f4b400;--close-b:#9a7400;--close2:#fef7e0;
+  --ok:#1e8e3e;--ok2:#e6f4ea;--bad:#d93025;--bad2:#fce8e6;
   --rg0:#009cde;--rg1:#000;--rg2:#63666a;--rg3:#0077c8;
   --f-ui:'Google Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --f-mo:'Roboto Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
@@ -197,13 +197,12 @@ td.tm{min-width:190px} td.reg{font-size:12px;color:var(--ink2)}
 /* Prediction indicators */
 .pi{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:6px;vertical-align:-1px;flex-shrink:0;box-sizing:border-box}
 .pi.sp{visibility:hidden}
-.pi.fav{border:2px solid var(--ok);background:transparent}
+.pi.fav{border:3px solid var(--ok);background:transparent}
 .pi.hit{border:2px solid var(--ok);background:var(--ok)}
 .pi.miss{border:2px solid var(--bad);background:var(--bad)}
-.pi.close{border:2px solid var(--close);background:var(--close)}
 .pp{font-family:var(--f-mo);font-size:11px;color:var(--ink2);margin-left:6px} .pp.was{color:var(--ink3)}
 .ptag{border-radius:4px;padding:1px 6px;font-size:11px;background:var(--s1);color:var(--ink);font-weight:500}
-.ptag.ok{background:var(--ok2);color:var(--ok)} .ptag.bad{background:var(--bad2);color:var(--bad)} .ptag.close{background:var(--close2);color:#5c4a00}
+.ptag.ok{background:var(--ok2);color:var(--ok)} .ptag.bad{background:var(--bad2);color:var(--bad)}
 .legend{margin:6px 0 10px;font-size:12.5px;color:var(--ink2)}
 .legend summary{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;cursor:pointer;list-style:none}
 .legend summary::-webkit-details-marker{display:none}
@@ -396,8 +395,6 @@ const CFG = {
   SIGMA: 11,                    // single-game margin std. dev., points
   PRIOR_GAMES: 6,               // weight of the preseason rating, in games
   NON_D1: -22,                  // rating used for non-Division I opponents
-  CLOSE_PP: 0.01,               // 'too close to call' if win probabilities differ by ≤ 1 point…
-  CLOSE_Z: 1,                   // …or the predicted margin is within 1 standard error of the rating gap
   PROXY: '',                    // optional CORS proxy prefix, e.g. 'https://my-worker.example/?url='
   ESPN: 'https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball',
   ESPN2: 'https://site.api.espn.com/apis/v2/sports/basketball/mens-college-basketball',
@@ -438,7 +435,7 @@ const ALIAS = {};          // normalized name -> key
 let DATA = load('data', null) || {ts:0, source:'seed', espn:{}, conf:{}, games:[], ext:{}, ap:{}, coaches:{}, weeks:{}, memberTs:0};
 let HIST = load('hist', []);
 let LOCKS = load('locks', {});
-let PREDS = load('preds', {});   // gameId -> [pHome, close, tsSec, gap, se] — last prediction saved before tipoff
+let PREDS = load('preds', {});   // gameId -> [pHome, (unused), tsSec, gap, se] — last prediction saved before tipoff
 let M = {};                // model output
 
 function buildTeams(){
@@ -902,15 +899,14 @@ function recompute(){
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  GAME PREDICTIONS — pre-game win probability, "too close" rule,
+//  GAME PREDICTIONS — pre-game win probability and predicted winner,
 //  saved before tipoff and never replaced after a game starts
 // ═══════════════════════════════════════════════════════════════════
 function predCore(rh, ra, neu, th, ta){
   const gap = rh - ra + (neu ? 0 : CFG.HCA);          // predicted home margin, points
   const se  = Math.sqrt(th*th + ta*ta);               // uncertainty in that margin from the two ratings
   const p   = Phi(gap / Math.sqrt(CFG.SIGMA**2 + se*se)); // home win probability
-  const close = Math.abs(2*p - 1) <= CFG.CLOSE_PP || Math.abs(gap) <= CFG.CLOSE_Z * se;
-  return {p, close, gap, se};
+  return {p, gap, se};
 }
 const gamePred = g => predCore(rOf(g.h), rOf(g.a), g.neu, tauOf(g.h), tauOf(g.a));
 function stampPreds(){
@@ -920,7 +916,7 @@ function stampPreds(){
     if (g.st !== 0 || now > g.t + 4*3600e3) continue;          // started, finished, or long overdue: frozen
     if (!TEAMS[g.h]?.active && !TEAMS[g.a]?.active) continue;
     const q = gamePred(g);
-    PREDS[g.id] = [+q.p.toFixed(4), q.close?1:0, ts, +q.gap.toFixed(1), +q.se.toFixed(1)];
+    PREDS[g.id] = [+q.p.toFixed(4), 0, ts, +q.gap.toFixed(1), +q.se.toFixed(1)];
   }
   const ids = new Set(M.games.map(g=>g.id));
   for (const id of Object.keys(PREDS)) if (!ids.has(id) && M.games.length > 500) delete PREDS[id];
@@ -954,7 +950,7 @@ function reconstruct(){
 }
 function predOf(g){
   const s = PREDS[g.id];
-  if (s) return {p:s[0], close:!!s[1], ts:s[2]*1000, gap:s[3], se:s[4], src:'saved'};
+  if (s) return {p:s[0], ts:s[2]*1000, gap:s[3], se:s[4], src:'saved'};
   if (g.st===2) return M.recon?.[g.id] ? {...M.recon[g.id], src:'recon'} : null;
   if (!TEAMS[g.h]?.active && !TEAMS[g.a]?.active) return null;
   return {...gamePred(g), ts: DATA.ts || Date.now(), src:'now'};
@@ -1276,10 +1272,7 @@ function predMarks(g){
   const mk = (cls, label) => `<span class="pi ${cls}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
   const pp = k => `<span class="pp${g.st===2?' was':''}" title="${g.st===2?'Pre-game win probability':'Win probability'}">${pct(k===g.h?ph:pa)}</span>`;
   let a = sp, h = sp, tag;
-  if (P.close){
-    const l = 'Too close to call'; a = mk('close',l); h = mk('close',l);
-    tag = `<span class="ptag close" title="${info}">Too close to call</span>`;
-  } else if (g.st!==2){
+  if (g.st!==2){
     const l = `Predicted winner, ${pct(fp)}`; if (fav===g.h) h = mk('fav',l); else a = mk('fav',l);
     tag = `<span class="ptag" title="${info}">Pick: ${esc(short(fav))} ${pct(fp)}</span>`;
   } else {
@@ -1293,19 +1286,19 @@ function predMarks(g){
 }
 function predLegend(){
   const i = (c,t) => `<span class="lg-i"><span class="pi ${c}" aria-hidden="true"></span>${t}</span>`;
-  return `<details class="legend"><summary>${i('fav','Predicted winner')}${i('hit','Predicted winner won')}${i('miss','Predicted winner lost')}${i('close','Too close to call')}<span class="lg-more">How predictions work</span></summary>
+  return `<details class="legend"><summary>${i('fav','Predicted winner')}${i('hit','Predicted winner won')}${i('miss','Predicted winner lost')}<span class="lg-more">How predictions work</span></summary>
   <div class="lg-body">
     <p>Percentages are each team's chance of winning before tipoff, from the power ratings, home court (${CFG.HCA} points) and an ${CFG.SIGMA}-point game-to-game spread.</p>
-    <p><strong>Too close to call</strong> means either the two teams' chances are within ${Math.round(CFG.CLOSE_PP*100)} percentage point of each other, or the predicted margin is smaller than the model's uncertainty in it. That uncertainty is the combined uncertainty of the two ratings: √(τ<sub>A</sub>² + τ<sub>B</sub>²), where each team's τ starts at 4.5 points and shrinks as it plays games (about 3.5 after 4 games, 2 after 25). Example: if Team A is predicted to win by 3 points ± 4, the game is too close to call. Too-close games are not graded right or wrong.</p>
+    <p>The predicted winner is the team above 50%. A 55% pick is close to a coin flip; a 90% pick rarely loses. Hover over a marker or label for the predicted margin and its uncertainty (± points), which shrinks as teams play more games.</p>
     <p><strong>Grading:</strong> finished games are judged against the last prediction this browser saved before tipoff; it is never updated after a game starts. Games that finished before your first refresh show a <strong>Reconstructed</strong> prediction instead: rebuilt from preseason ratings and results from earlier days only, so the result itself is never used. Hover over any marker or label for the predicted margin and when the prediction was made.</p>
   </div></details>`;
 }
 function predRecord(games){
-  let c=0, m=0, cl=0, rc=0;
+  let c=0, m=0, rc=0;
   for (const g of games){ if (g.st!==2) continue; const P = predOf(g); if (!P) continue; if (P.src==='recon') rc++;
-    if (P.close) cl++; else if ((g.hs>g.as?g.h:g.a) === (P.p>=.5?g.h:g.a)) c++; else m++; }
-  if (!(c+m+cl)) return '';
-  return `<p class="prec">Model on these finished games: <strong>${c} correct, ${m} missed</strong> (${Math.round(100*c/Math.max(1,c+m))}% of games it called) · ${cl} too close to call${rc?` · ${rc} graded on reconstructed predictions`:''}</p>`;
+    if ((g.hs>g.as?g.h:g.a) === (P.p>=.5?g.h:g.a)) c++; else m++; }
+  if (!(c+m)) return '';
+  return `<p class="prec">Model on these finished games: <strong>${c} correct, ${m} missed</strong> (${Math.round(100*c/Math.max(1,c+m))}%)${rc?` · ${rc} graded on reconstructed predictions`:''}</p>`;
 }
 function gamesBlock(games, mode, name, focus){
   let gs = mode==='completed' ? games.filter(g=>g.st===2).reverse() : mode==='upcoming' ? games.filter(g=>g.st!==2) : games;
@@ -1376,7 +1369,7 @@ function renderMethod(){
   <p><strong>Building the bracket.</strong> The 76 teams are ranked 1–76. The 12 lowest automatic qualifiers and 12 lowest at-large teams pair off in the Opening Round. Everyone else is placed on an S-curve across four regions, keeping teams from the same conference apart on the top eight lines. After Selection Sunday the app switches to the official bracket as soon as it appears in the feed.</p>
   <p><strong>Round-by-round odds.</strong> Probabilities are computed exactly through every possible path in the bracket, not by random simulation. Finished tournament games are locked in, so each refresh after a round re-forecasts only what is left.</p>
   <p><strong>Tracking change.</strong> Each refresh saves a snapshot of every team's power rank, seed, and round odds in this browser. The Title odds, What changed, and team views compare the latest forecast with the one before it.</p>
-  <p><strong>Game predictions.</strong> Every game in the Conferences tab and team schedules shows each team's win probability before tipoff: the rating gap plus ${CFG.HCA} points for the home team (none at neutral sites), on a normal curve with an ${CFG.SIGMA}-point spread widened by both teams' rating uncertainty. A game is <em>too close to call</em> when the chances are within ${Math.round(CFG.CLOSE_PP*100)} percentage point or the predicted margin is smaller than its uncertainty, √(τ<sub>A</sub>² + τ<sub>B</sub>²), where each team's τ is 4.5 points before any games and shrinks as games are played. Each refresh saves the latest prediction for every game that hasn't started; once a game tips off, its saved prediction is frozen and is what the result is graded against. Games that finished before this browser's first refresh are graded on a reconstructed prediction that uses only results from earlier days and the preseason ratings, not later polls.</p>
+  <p><strong>Game predictions.</strong> Every game in the Conferences tab and team schedules shows each team's win probability before tipoff: the rating gap plus ${CFG.HCA} points for the home team (none at neutral sites), on a normal curve with an ${CFG.SIGMA}-point spread widened by both teams' rating uncertainty. The team above 50% is the predicted winner. Each refresh saves the latest prediction for every game that hasn't started; once a game tips off, its saved prediction is frozen and is what the result is graded against. Games that finished before this browser's first refresh are graded on a reconstructed prediction that uses only results from earlier days and the preseason ratings, not later polls.</p>
   <p><strong>Data.</strong> Refresh data reads ESPN's public scoreboard, standings, and rankings feeds: conference membership, results, schedules, TV, venues, and box-score totals for team stats. It works when this page is served from a normal website or opened as a local file. If a host blocks outside requests, set <code>CFG.PROXY</code> at the top of the script to your own proxy.</p>
   <p class="mut">Not affiliated with the NCAA or ESPN. For entertainment and planning; not betting advice.</p>
   <p><button class="btn-q" id="reset-hist">Clear saved history</button></p></article>`;
