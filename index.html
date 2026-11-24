@@ -64,7 +64,7 @@ sup{font-size:.62em;color:var(--acc3);margin-left:1px;font-family:var(--f-mo)}
 #progress i{display:block;height:100%;width:0;background:var(--acc);transition:width .3s}
 
 /* Season track — the signature element */
-.track{display:flex;list-style:none;margin:18px calc(-1*var(--px)) 0;padding:0 var(--px);overflow-x:auto;scrollbar-width:none;counter-reset:st}
+.track{display:flex;list-style:none;margin:10px calc(-1*var(--px)) 0;padding:8px var(--px) 0;overflow-x:auto;scrollbar-width:none;counter-reset:st}
 .track::-webkit-scrollbar{display:none}
 .track li{flex:1 0 auto;min-width:92px;position:relative;padding:14px 12px 12px 0;display:flex;flex-direction:column;gap:1px}
 .track li::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;background:var(--b0)}
@@ -342,7 +342,7 @@ const SEED_CONFS = [
  ['sum','Summit','Summit League',/summit/i,
   `North Dakota State:1|St. Thomas:1~St. Thomas-Minnesota~St Thomas (MN)|South Dakota State:-2|Omaha:-4~Nebraska Omaha|North Dakota:-6|South Dakota:-6|Kansas City:-7~UMKC|Oral Roberts:-8`],
  ['ovc','OVC','Ohio Valley Conference',/ohio valley/i,
-  `Southeast Missouri State:-5~SE Missouri State|Morehead State:-5|SIU Edwardsville:-6~SIUE|Tennessee State:-6|UT Martin:-7~Tennessee Martin|Lindenwood:-9|Southern Indiana:-9|Eastern Illinois:-9`],
+  `Southeast Missouri State:-5~SE Missouri State|Morehead State:-5|SIU Edwardsville:-6~SIUE|Tennessee State:-6|UT Martin:-7~Tennessee Martin|Lindenwood:-9|Southern Indiana:-9|Eastern Illinois:-9|Western Illinois:-10~WIU`],
  ['socon','SoCon','Southern Conference',/southern conf|^socon$/i,
   `East Tennessee State:0~ETSU|Furman:-1|Samford:-1|Chattanooga:-2|Wofford:-2|UNC Greensboro:-2~UNCG|Mercer:-3|Western Carolina:-6|Tennessee Tech:-7|VMI:-9|The Citadel:-10`],
  ['slc','Southland','Southland Conference',/southland/i,
