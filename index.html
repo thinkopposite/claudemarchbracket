@@ -19,6 +19,7 @@
   --ink:#000;--ink2:#63666a;--ink3:#75787b;
   --acc:#009cde;--acc2:#e6f5fc;--acc3:#0077c8;
   --grn:#0077c8;--grn2:#e6f5fc;--red:#63666a;--red2:#f1f2f2;--gld:#b1b3b3;--gld2:#f1f2f2;--blu:#0077c8;--blu2:#e6f5fc;--cyn:#fff;--cyn2:#000;
+  --ok:#1e8e3e;--ok2:#e6f4ea;--bad:#d93025;--bad2:#fce8e6;--close:#fbc02d;--close-b:#9a7400;--close2:#fef7e0;
   --rg0:#009cde;--rg1:#000;--rg2:#63666a;--rg3:#0077c8;
   --f-ui:'Google Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --f-mo:'Roboto Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace;
@@ -193,6 +194,25 @@ td.tm{min-width:190px} td.reg{font-size:12px;color:var(--ink2)}
 .res{font-family:var(--f-mo);font-size:12px} .res.w{color:var(--grn);font-weight:600} .res.l{color:var(--red);font-weight:600}
 .tag{background:var(--s1);border-radius:4px;padding:1px 6px;font-size:11px} .tag.tv{background:var(--blu2);color:var(--blu)}
 .plc{color:var(--ink3)}
+/* Prediction indicators */
+.pi{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:6px;vertical-align:-1px;flex-shrink:0;box-sizing:border-box}
+.pi.sp{visibility:hidden}
+.pi.fav{border:2px solid var(--ok);background:transparent}
+.pi.hit{border:2px solid var(--ok);background:var(--ok)}
+.pi.miss{border:2.5px solid var(--ok);background:var(--bad)}
+.pi.close{border:2px solid var(--close-b);background:var(--close)}
+.pp{font-family:var(--f-mo);font-size:11px;color:var(--ink2);margin-left:6px} .pp.was{color:var(--ink3)}
+.ptag{border-radius:4px;padding:1px 6px;font-size:11px;background:var(--s1);color:var(--ink);font-weight:500}
+.ptag.ok{background:var(--ok2);color:var(--ok)} .ptag.bad{background:var(--bad2);color:var(--bad)} .ptag.close{background:var(--close2);color:#5c4a00}
+.legend{margin:6px 0 10px;font-size:12.5px;color:var(--ink2)}
+.legend summary{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;cursor:pointer;list-style:none}
+.legend summary::-webkit-details-marker{display:none}
+.lg-i{display:inline-flex;align-items:center;white-space:nowrap}
+.lg-more{color:var(--acc3);text-decoration:underline;text-underline-offset:2px}
+.legend[open] .lg-more{color:var(--ink2)}
+.lg-body{background:var(--s1);border-radius:var(--r);padding:10px 12px;margin-top:8px;max-width:86ch;color:var(--ink)}
+.lg-body p{margin-bottom:6px;line-height:1.55} .lg-body p:last-child{margin-bottom:0}
+.prec{font-size:12.5px;color:var(--ink2);margin:0 0 6px}
 .live{color:#fff;background:#000;border-radius:4px;padding:0 5px;font-size:10.5px}
 
 /* Movement */
@@ -376,6 +396,8 @@ const CFG = {
   SIGMA: 11,                    // single-game margin std. dev., points
   PRIOR_GAMES: 6,               // weight of the preseason rating, in games
   NON_D1: -22,                  // rating used for non-Division I opponents
+  CLOSE_PP: 0.01,               // 'too close to call' if win probabilities differ by ≤ 1 point…
+  CLOSE_Z: 1,                   // …or the predicted margin is within 1 standard error of the rating gap
   PROXY: '',                    // optional CORS proxy prefix, e.g. 'https://my-worker.example/?url='
   ESPN: 'https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball',
   ESPN2: 'https://site.api.espn.com/apis/v2/sports/basketball/mens-college-basketball',
@@ -416,6 +438,7 @@ const ALIAS = {};          // normalized name -> key
 let DATA = load('data', null) || {ts:0, source:'seed', espn:{}, conf:{}, games:[], ext:{}, ap:{}, coaches:{}, weeks:{}, memberTs:0};
 let HIST = load('hist', []);
 let LOCKS = load('locks', {});
+let PREDS = load('preds', {});   // gameId -> [pHome, close, tsSec, gap, se] — last prediction saved before tipoff
 let M = {};                // model output
 
 function buildTeams(){
@@ -670,7 +693,7 @@ function playDist(A,B,lockW){
   }
   return out;
 }
-const rOf = k => TEAMS[k] ? TEAMS[k].rating : CFG.NON_D1;
+const rOf = k => TEAMS[k]?.active && Number.isFinite(TEAMS[k].rating) ? TEAMS[k].rating : CFG.NON_D1;
 // Rating uncertainty: wide in preseason, narrows as games are played
 const tauOf = k => { const t=TEAMS[k]; if(!t) return 4.5; const n=t.st?.gp||0; return 4.5*Math.sqrt(CFG.PRIOR_GAMES/(CFG.PRIOR_GAMES+n)); };
 function singleElim(keys){
@@ -875,6 +898,66 @@ function recompute(){
   M.pos = leafIndex(M.bracket);
   M.phase = detectPhase();
   M.done = roundsComplete();
+  reconstruct();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  GAME PREDICTIONS — pre-game win probability, "too close" rule,
+//  saved before tipoff and never replaced after a game starts
+// ═══════════════════════════════════════════════════════════════════
+function predCore(rh, ra, neu, th, ta){
+  const gap = rh - ra + (neu ? 0 : CFG.HCA);          // predicted home margin, points
+  const se  = Math.sqrt(th*th + ta*ta);               // uncertainty in that margin from the two ratings
+  const p   = Phi(gap / Math.sqrt(CFG.SIGMA**2 + se*se)); // home win probability
+  const close = Math.abs(2*p - 1) <= CFG.CLOSE_PP || Math.abs(gap) <= CFG.CLOSE_Z * se;
+  return {p, close, gap, se};
+}
+const gamePred = g => predCore(rOf(g.h), rOf(g.a), g.neu, tauOf(g.h), tauOf(g.a));
+function stampPreds(){
+  // Save (or update) the prediction for every game that has not started yet.
+  const now = Date.now(), ts = Math.round((DATA.ts || now)/1000);
+  for (const g of M.games){
+    if (g.st !== 0 || now > g.t + 4*3600e3) continue;          // started, finished, or long overdue: frozen
+    if (!TEAMS[g.h]?.active && !TEAMS[g.a]?.active) continue;
+    const q = gamePred(g);
+    PREDS[g.id] = [+q.p.toFixed(4), q.close?1:0, ts, +q.gap.toFixed(1), +q.se.toFixed(1)];
+  }
+  const ids = new Set(M.games.map(g=>g.id));
+  for (const id of Object.keys(PREDS)) if (!ids.has(id) && M.games.length > 500) delete PREDS[id];
+  store('preds', PREDS);
+}
+function reconstruct(){
+  // Completed games with no saved pre-game prediction (played before this browser's first refresh)
+  // get a reconstructed one: ratings rebuilt from preseason ratings and results from EARLIER days only.
+  M.recon = {};
+  const done = M.games.filter(g=>g.st===2 && !PREDS[g.id] && (TEAMS[g.h]?.active || TEAMS[g.a]?.active));
+  if (!done.length) return;
+  const act = Object.values(TEAMS).filter(t=>t.active), W = CFG.PRIOR_GAMES;
+  const day0 = t => { const d = new Date(t); d.setHours(0,0,0,0); return d.getTime(); };
+  const byDay = new Map(); done.forEach(g=>{ const d=day0(g.t); if(!byDay.has(d)) byDay.set(d,[]); byDay.get(d).push(g); });
+  let R = {}; act.forEach(t=>R[t.key]=t.seedPrior);
+  for (const d of [...byDay.keys()].sort((a,b)=>a-b)){
+    const res = {}; act.forEach(t=>res[t.key]=t.res.filter(r=>r.t<d));
+    for (let it=0; it<25; it++){
+      const nx = {};
+      for (const t of act){ let sum=W*t.seedPrior, n=W;
+        for (const r of res[t.key]){ const or = TEAMS[r.opp]?.active ? R[r.opp] : CFG.NON_D1;
+          const adv = r.loc==='h' ? CFG.HCA : r.loc==='a' ? -CFG.HCA : 0;
+          sum += Math.sign(r.m)*Math.min(Math.abs(r.m),25) - adv + or; n++; }
+        nx[t.key] = sum/n; }
+      R = nx;
+    }
+    const rr = k => TEAMS[k]?.active ? R[k] : CFG.NON_D1;
+    const tau = k => TEAMS[k]?.active ? 4.5*Math.sqrt(W/(W+res[k].length)) : 4.5;
+    for (const g of byDay.get(d)) M.recon[g.id] = {...predCore(rr(g.h), rr(g.a), g.neu, tau(g.h), tau(g.a)), ts:d};
+  }
+}
+function predOf(g){
+  const s = PREDS[g.id];
+  if (s) return {p:s[0], close:!!s[1], ts:s[2]*1000, gap:s[3], se:s[4], src:'saved'};
+  if (g.st===2) return M.recon?.[g.id] ? {...M.recon[g.id], src:'recon'} : null;
+  if (!TEAMS[g.h]?.active && !TEAMS[g.a]?.active) return null;
+  return {...gamePred(g), ts: DATA.ts || Date.now(), src:'now'};
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1181,8 +1264,50 @@ function renderConfs(){
       <th title="Points per game">PPG</th><th title="Opponent points per game">Opp</th><th>FG%</th><th>3P%</th><th title="Rebounds per game">Reb</th><th title="Assists per game">Ast</th><th title="Turnovers per game">TO</th><th>Last 10</th><th>Streak</th><th title="Projected NCAA seed">Seed</th><th>Make field</th><th title="Chance to win the conference tournament">Auto bid</th></tr></thead><tbody>${rows}</tbody></table></div>
     ${gamesBlock(M.games.filter(g=> (TEAMS[g.h]?.conf===c.id) || (TEAMS[g.a]?.conf===c.id)), UI.confGames, 'confgames')}`;
 }
+function predMarks(g){
+  const sp = '<span class="pi sp" aria-hidden="true"></span>';
+  const P = predOf(g);
+  if (!P) return {a:sp, h:sp, pp:()=>'', tag:''};
+  const ph = P.p, pa = 1-ph, fav = ph>=pa ? g.h : g.a, fp = Math.max(ph,pa);
+  const fmtT = t => new Date(t).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  const when = P.src==='recon' ? `Reconstructed: uses only results before ${fdate(P.ts)}, not a prediction published at the time`
+    : P.src==='saved' ? `Prediction saved ${fmtT(P.ts)}${g.st?' (last one before tipoff)':''}` : `Prediction as of ${fmtT(P.ts)}`;
+  const info = esc(`${short(fav)} by ${Math.abs(P.gap).toFixed(1)} ± ${P.se.toFixed(1)} pts · ${short(g.a)} ${pct(pa)}, ${short(g.h)} ${pct(ph)} · ${when}`);
+  const mk = (cls, label) => `<span class="pi ${cls}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
+  const pp = k => `<span class="pp${g.st===2?' was':''}" title="${g.st===2?'Pre-game win probability':'Win probability'}">${pct(k===g.h?ph:pa)}</span>`;
+  let a = sp, h = sp, tag;
+  if (P.close){
+    const l = 'Too close to call'; a = mk('close',l); h = mk('close',l);
+    tag = `<span class="ptag close" title="${info}">Too close to call</span>`;
+  } else if (g.st!==2){
+    const l = `Predicted winner, ${pct(fp)}`; if (fav===g.h) h = mk('fav',l); else a = mk('fav',l);
+    tag = `<span class="ptag" title="${info}">Pick: ${esc(short(fav))} ${pct(fp)}</span>`;
+  } else {
+    const ok = (g.hs>g.as ? g.h : g.a) === fav;
+    const l = ok ? 'Predicted winner — won (prediction correct)' : 'Predicted winner — lost (prediction missed)';
+    if (fav===g.h) h = mk(ok?'hit':'miss', l); else a = mk(ok?'hit':'miss', l);
+    tag = `<span class="ptag ${ok?'ok':'bad'}" title="${info}">${ok?'✓ Correct':'✗ Missed'}</span>`;
+  }
+  if (P.src==='recon') tag += `<span class="tag" title="${info}">Reconstructed</span>`;
+  return {a, h, pp, tag};
+}
+function predLegend(){
+  const i = (c,t) => `<span class="lg-i"><span class="pi ${c}" aria-hidden="true"></span>${t}</span>`;
+  return `<details class="legend"><summary>${i('fav','Predicted winner')}${i('hit','Predicted winner won')}${i('miss','Predicted winner lost')}${i('close','Too close to call')}<span class="lg-more">How predictions work</span></summary>
+  <div class="lg-body">
+    <p>Percentages are each team's chance of winning before tipoff, from the power ratings, home court (${CFG.HCA} points) and an ${CFG.SIGMA}-point game-to-game spread.</p>
+    <p><strong>Too close to call</strong> means either the two teams' chances are within ${Math.round(CFG.CLOSE_PP*100)} percentage point of each other, or the predicted margin is smaller than the model's uncertainty in it. That uncertainty is the combined uncertainty of the two ratings: √(τ<sub>A</sub>² + τ<sub>B</sub>²), where each team's τ starts at 4.5 points and shrinks as it plays games (about 3.5 after 4 games, 2 after 25). Example: if Team A is predicted to win by 3 points ± 4, the game is too close to call. Too-close games are not graded right or wrong.</p>
+    <p><strong>Grading:</strong> finished games are judged against the last prediction this browser saved before tipoff; it is never updated after a game starts. Games that finished before your first refresh show a <strong>Reconstructed</strong> prediction instead: rebuilt from preseason ratings and results from earlier days only, so the result itself is never used. Hover over any marker or label for the predicted margin and when the prediction was made.</p>
+  </div></details>`;
+}
+function predRecord(games){
+  let c=0, m=0, cl=0, rc=0;
+  for (const g of games){ if (g.st!==2) continue; const P = predOf(g); if (!P) continue; if (P.src==='recon') rc++;
+    if (P.close) cl++; else if ((g.hs>g.as?g.h:g.a) === (P.p>=.5?g.h:g.a)) c++; else m++; }
+  if (!(c+m+cl)) return '';
+  return `<p class="prec">Model on these finished games: <strong>${c} correct, ${m} missed</strong> (${Math.round(100*c/Math.max(1,c+m))}% of games it called) · ${cl} too close to call${rc?` · ${rc} graded on reconstructed predictions`:''}</p>`;
+}
 function gamesBlock(games, mode, name, focus){
-  const now = Date.now();
   let gs = mode==='completed' ? games.filter(g=>g.st===2).reverse() : mode==='upcoming' ? games.filter(g=>g.st!==2) : games;
   const lim = focus ? 400 : 120; const more = gs.length>lim; gs = gs.slice(0,lim);
   const seg = ['upcoming','completed','all'].map(m=>`<button class="chip${mode===m?' on':''}" data-${name}="${m}">${m==='upcoming'?'Upcoming':m==='completed'?'Completed':'Full season'}</button>`).join('');
@@ -1190,18 +1315,19 @@ function gamesBlock(games, mode, name, focus){
   const rows = gs.map(g=>{
     const day = fdate(g.t); const hd = !focus && day!==lastDay ? `<li class="gday">${day}</li>` : ''; lastDay = day;
     const at = g.neu ? 'vs' : '@';
-    const side = (k,s,win) => `<span class="gt${win?' w':''}">${apTag(k)}${tlink(k, short(k))}${s!==null&&g.st?` <b>${s}</b>`:''}</span>`;
+    const pm = predMarks(g);
+    const side = (k,s,win,mark) => `<span class="gt${win?' w':''}">${mark}${apTag(k)}${tlink(k, short(k))}${s!==null&&g.st?` <b>${s}</b>`:''}${pm.pp(k)}</span>`;
     let mid, meta;
-    if (g.st===2){ const hw=g.hs>g.as; mid = `${side(g.a,g.as,!hw)}<span class="at">${at}</span>${side(g.h,g.hs,hw)}`;
+    if (g.st===2){ const hw=g.hs>g.as; mid = `${side(g.a,g.as,!hw,pm.a)}<span class="at">${at}</span>${side(g.h,g.hs,hw,pm.h)}`;
       const persp = focus ? (()=>{ const home=g.h===focus; const my=home?g.hs:g.as, op=home?g.as:g.hs; return `<span class="res ${my>op?'w':'l'}">${my>op?'W':'L'} ${my}-${op}</span>`; })() : `<span class="res f">Final${/OT/.test(g.detail)?' '+esc(g.detail.replace(/^Final\/?/,'')):''}</span>`;
-      meta = `${persp}${g.cnf?'<span class="tag">Conf.</span>':''}${g.note?`<span class="tag">${esc(g.note.replace(/^Men's Basketball Championship - /,''))}</span>`:''}`; }
-    else { mid = `${side(g.a,null)}<span class="at">${at}</span>${side(g.h,null)}`;
-      meta = `<span class="res">${g.st===1?`<span class="live">Live</span> ${esc(g.detail)}`:ftime(g.t)}</span>${g.tv?`<span class="tag tv">${esc(g.tv)}</span>`:''}${g.cnf?'<span class="tag">Conf.</span>':''}`; }
+      meta = `${persp}${pm.tag}${g.cnf?'<span class="tag">Conf.</span>':''}${g.note?`<span class="tag">${esc(g.note.replace(/^Men's Basketball Championship - /,''))}</span>`:''}`; }
+    else { mid = `${side(g.a,null,false,pm.a)}<span class="at">${at}</span>${side(g.h,null,false,pm.h)}`;
+      meta = `<span class="res">${g.st===1?`<span class="live">Live</span> ${esc(g.detail)}`:ftime(g.t)}</span>${pm.tag}${g.tv?`<span class="tag tv">${esc(g.tv)}</span>`:''}${g.cnf?'<span class="tag">Conf.</span>':''}`; }
     return `${hd}<li class="gm"><div class="gmain">${focus?`<span class="gd">${day}</span>`:''}${mid}</div><div class="gmeta">${meta}${g.place?`<span class="plc">${esc(g.place)}</span>`:''}</div></li>`;
   }).join('');
   const empty = games.length ? `<p class="mut">No ${mode==='upcoming'?'upcoming':'completed'} games.</p>`
     : `<div class="empty sm"><p>No games loaded yet. <strong>Refresh data</strong> pulls the ${CFG.LABEL} schedule, results, TV and venues.</p></div>`;
-  return `<section class="games"><div class="toolbar"><h3>Games</h3><div class="chips">${seg}</div></div>${gs.length?`<ul class="glist">${rows}</ul>`:empty}${more?`<p class="mut">Showing ${lim} of ${games.length}. Open a team for its full schedule.</p>`:''}</section>`;
+  return `<section class="games"><div class="toolbar"><h3>Games</h3><div class="chips">${seg}</div></div>${games.length?predLegend():''}${mode!=='upcoming'?predRecord(games):''}${gs.length?`<ul class="glist">${rows}</ul>`:empty}${more?`<p class="mut">Showing ${lim} of ${games.length}. Open a team for its full schedule.</p>`:''}</section>`;
 }
 
 // ─── Team drawer ──────────────────────────────────────────────────
@@ -1250,6 +1376,7 @@ function renderMethod(){
   <p><strong>Building the bracket.</strong> The 76 teams are ranked 1–76. The 12 lowest automatic qualifiers and 12 lowest at-large teams pair off in the Opening Round. Everyone else is placed on an S-curve across four regions, keeping teams from the same conference apart on the top eight lines. After Selection Sunday the app switches to the official bracket as soon as it appears in the feed.</p>
   <p><strong>Round-by-round odds.</strong> Probabilities are computed exactly through every possible path in the bracket, not by random simulation. Finished tournament games are locked in, so each refresh after a round re-forecasts only what is left.</p>
   <p><strong>Tracking change.</strong> Each refresh saves a snapshot of every team's power rank, seed, and round odds in this browser. The Title odds, What changed, and team views compare the latest forecast with the one before it.</p>
+  <p><strong>Game predictions.</strong> Every game in the Conferences tab and team schedules shows each team's win probability before tipoff: the rating gap plus ${CFG.HCA} points for the home team (none at neutral sites), on a normal curve with an ${CFG.SIGMA}-point spread widened by both teams' rating uncertainty. A game is <em>too close to call</em> when the chances are within ${Math.round(CFG.CLOSE_PP*100)} percentage point or the predicted margin is smaller than its uncertainty, √(τ<sub>A</sub>² + τ<sub>B</sub>²), where each team's τ is 4.5 points before any games and shrinks as games are played. Each refresh saves the latest prediction for every game that hasn't started; once a game tips off, its saved prediction is frozen and is what the result is graded against. Games that finished before this browser's first refresh are graded on a reconstructed prediction that uses only results from earlier days and the preseason ratings, not later polls.</p>
   <p><strong>Data.</strong> Refresh data reads ESPN's public scoreboard, standings, and rankings feeds: conference membership, results, schedules, TV, venues, and box-score totals for team stats. It works when this page is served from a normal website or opened as a local file. If a host blocks outside requests, set <code>CFG.PROXY</code> at the top of the script to your own proxy.</p>
   <p class="mut">Not affiliated with the NCAA or ESPN. For entertainment and planning; not betting advice.</p>
   <p><button class="btn-q" id="reset-hist">Clear saved history</button></p></article>`;
@@ -1282,7 +1409,7 @@ async function refreshData(){
   if (anyOk){
     DATA.ts = Date.now(); DATA.source = 'espn';
     if (!store('data', DATA)){ const slim = {...DATA, games: DATA.games.map(g=>{const c=g.slice(); c[12]=c[13]=null; return c;})}; store('data', slim); }
-    recompute(); pushSnapshot(); renderAll();
+    recompute(); stampPreds(); pushSnapshot(); renderAll();
     const pv = prevSnap();
     toast(fails.length ? `Updated, but ${fails.join(' and ')} couldn't be loaded. Try again shortly.` :
       `Forecast updated${pv?` · compared with ${new Date(pv.ts).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`:''}.`, fails.length?'warn':'ok');
